@@ -83,6 +83,13 @@
       }
     },
     "sensor": {
+      "current_area": {
+        "default": "mdi:map-marker-radius",
+        "state": {
+          "transit": "mdi:map-marker-path",
+          "docked": "mdi:home-lightning-bolt-outline"
+        }
+      },
       "activity": {
         "default": "mdi:robot-mower-outline",
         "state": {
