@@ -169,6 +169,10 @@ class MowerProfile:
 #                     areas in the app:
 #                     [["1","1","Hinten","","-16900","13900","0-0"], …] —
 #                     ids, the new names, and a point inside each area.
+#                     6n9pcz: enabled on an O600 RTK to put the app's area
+#                     names on the current area sensor; pending the owner's
+#                     check that the names and their points land in the
+#                     right lawns on the map.
 #   area_nogo       — 9bts2s: the three-area onArI captured on the O800 RTK,
 #                     firmware 1.13.8 (issue #41). Exactly one of its areas
 #                     carries a section-2 ring, and it is the area its owner
@@ -267,7 +271,7 @@ SUPPORTED_CLASSES: dict[str, MowerProfile] = {
     "e4gqia": MowerProfile("e4gqia", area_parameters=True, zone_mowing=True),
     "xmp9ds": MowerProfile("xmp9ds"),
     "o4kvvk": MowerProfile("o4kvvk"),
-    "6n9pcz": MowerProfile("6n9pcz"),
+    "6n9pcz": MowerProfile("6n9pcz", area_names=True),
     "0jbd6s": MowerProfile("0jbd6s"),
     "51rcxt": MowerProfile(
         "51rcxt", area_parameters=True, zone_mowing=True, border_mowing=True

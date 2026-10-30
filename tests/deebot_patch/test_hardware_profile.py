@@ -38,7 +38,7 @@ def test_area_names_are_enabled_only_for_the_validated_class() -> None:
     """The ar row's shape is not inferred from another class's."""
     assert {
         class_ for class_, profile in SUPPORTED_CLASSES.items() if profile.area_names
-    } == {"9bts2s"}
+    } == {"9bts2s", "6n9pcz"}
 
 
 def test_area_nogo_is_enabled_only_for_the_validated_class() -> None:
