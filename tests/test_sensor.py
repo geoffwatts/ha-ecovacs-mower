@@ -37,6 +37,7 @@ def test_expected_sensor_keys() -> None:
     from custom_components.ecovacs_mower.sensor import (
         ENTITY_DESCRIPTIONS,
         EcovacsActivitySensor,
+        EcovacsCurrentAreaSensor,
         EcovacsErrorSensor,
         EcovacsMowingProgressSensor,
     )
@@ -45,6 +46,7 @@ def test_expected_sensor_keys() -> None:
         EcovacsErrorSensor.entity_description.key,
         EcovacsActivitySensor.entity_description.key,
         EcovacsMowingProgressSensor.entity_description.key,
+        EcovacsCurrentAreaSensor.entity_description.key,
     }
     assert keys == {
         "stats_area",
@@ -59,6 +61,7 @@ def test_expected_sensor_keys() -> None:
         "error",
         "activity",
         "mowing_progress",
+        "current_area",
     }
 
 
@@ -87,6 +90,7 @@ def test_every_description_has_a_translation() -> None:
         ENTITY_DESCRIPTIONS,
         LIFESPAN_ENTITY_DESCRIPTIONS,
         EcovacsActivitySensor,
+        EcovacsCurrentAreaSensor,
         EcovacsErrorSensor,
         EcovacsMowingProgressSensor,
         beacon_entity_description,
@@ -102,6 +106,7 @@ def test_every_description_has_a_translation() -> None:
         EcovacsErrorSensor.entity_description,
         EcovacsActivitySensor.entity_description,
         EcovacsMowingProgressSensor.entity_description,
+        EcovacsCurrentAreaSensor.entity_description,
         # Built per beacon at runtime, so there is no tuple to splat. Every
         # serial yields the same translation key, which is what these three
         # tests check.
@@ -127,6 +132,7 @@ def test_every_sensor_has_an_icon() -> None:
         ENTITY_DESCRIPTIONS,
         LIFESPAN_ENTITY_DESCRIPTIONS,
         EcovacsActivitySensor,
+        EcovacsCurrentAreaSensor,
         EcovacsErrorSensor,
         EcovacsMowingProgressSensor,
         beacon_entity_description,
@@ -142,6 +148,7 @@ def test_every_sensor_has_an_icon() -> None:
         EcovacsErrorSensor.entity_description,
         EcovacsActivitySensor.entity_description,
         EcovacsMowingProgressSensor.entity_description,
+        EcovacsCurrentAreaSensor.entity_description,
         # Built per beacon at runtime, so there is no tuple to splat. Every
         # serial yields the same translation key, which is what these three
         # tests check.
@@ -166,6 +173,7 @@ def test_no_stale_sensor_translations_or_icons() -> None:
         ENTITY_DESCRIPTIONS,
         LIFESPAN_ENTITY_DESCRIPTIONS,
         EcovacsActivitySensor,
+        EcovacsCurrentAreaSensor,
         EcovacsErrorSensor,
         EcovacsMowingProgressSensor,
         beacon_entity_description,
@@ -181,6 +189,7 @@ def test_no_stale_sensor_translations_or_icons() -> None:
         EcovacsErrorSensor.entity_description,
         EcovacsActivitySensor.entity_description,
         EcovacsMowingProgressSensor.entity_description,
+        EcovacsCurrentAreaSensor.entity_description,
         # Built per beacon at runtime, so there is no tuple to splat. Every
         # serial yields the same translation key, which is what these three
         # tests check.
@@ -1468,3 +1477,165 @@ async def test_a_charge_break_resume_is_not_a_new_job() -> None:
     await sensor._on_state(_state_event(State.CLEANING))
 
     assert sensor._attr_native_value == 55
+
+
+# --- Current area -----------------------------------------------------------
+
+# Two lawns 10 m apart with a passage between them, in the map frame (mm).
+_FRONT = [(0, 0), (10000, 0), (10000, 10000), (0, 10000)]
+_BACK = [(20000, 0), (30000, 0), (30000, 10000), (20000, 10000)]
+
+
+def _bare_area_sensor(labels=()):
+    """An EcovacsCurrentAreaSensor over a real MowerMap, without device or hass.
+
+    The same ``__new__`` trick as ``_bare_activity_sensor``. Every write is
+    recorded, because "only on a change" is part of what is under test.
+    """
+    from custom_components.ecovacs_mower.map import MowerMap
+    from custom_components.ecovacs_mower.sensor import EcovacsCurrentAreaSensor
+
+    mower_map = MowerMap()
+    mower_map.update_map_info([_FRONT, _BACK], None, None)
+    mower_map.update_labels(list(labels))
+    sensor = EcovacsCurrentAreaSensor.__new__(EcovacsCurrentAreaSensor)
+    sensor._map = mower_map
+    sensor._state = None
+    sensor._area_index = None
+    sensor._previous_area = None
+    sensor._attr_native_value = None
+    sensor._attr_extra_state_attributes = {}
+    sensor.writes = []
+    sensor.async_write_ha_state = lambda: sensor.writes.append(
+        (sensor._attr_native_value, dict(sensor._attr_extra_state_attributes))
+    )
+    return sensor
+
+
+def _at(x: int, y: int):
+    from deebot_client.events import Position, PositionsEvent
+    from deebot_client.rs.map import PositionType
+
+    return PositionsEvent([Position(type=PositionType.DEEBOT, x=x, y=y, a=0)])
+
+
+async def test_the_area_is_the_one_the_mower_is_in() -> None:
+    sensor = _bare_area_sensor()
+    await sensor._on_positions(_at(5000, 5000))
+    assert sensor._attr_native_value == "Area 1"
+    await sensor._on_positions(_at(25000, 5000))
+    # Straight from one to the other: no transit sample in between.
+    assert sensor._attr_native_value == "Area 2"
+
+
+async def test_the_mower_own_label_names_the_area() -> None:
+    sensor = _bare_area_sensor(labels=[((25000, 5000), "Back lawn")])
+    await sensor._on_positions(_at(25000, 5000))
+    assert sensor._attr_native_value == "Back lawn"
+    await sensor._on_positions(_at(5000, 5000))
+    # A label that falls in no area does not name this one.
+    assert sensor._attr_native_value == "Area 1"
+
+
+async def test_leaving_an_area_is_transit_with_the_area_left_behind() -> None:
+    """The trigger this sensor exists for: "left area X" as one state change."""
+    sensor = _bare_area_sensor(labels=[((5000, 5000), "Front")])
+    await sensor._on_positions(_at(5000, 5000))
+    await sensor._on_positions(_at(15000, 5000))
+    assert sensor._attr_native_value == "transit"
+    assert sensor._attr_extra_state_attributes == {"previous_area": "Front"}
+
+
+async def test_the_edge_does_not_flicker_through_transit() -> None:
+    """A pass just over the outline of the area being mowed keeps that area."""
+    from custom_components.ecovacs_mower.sensor import AREA_EDGE_MARGIN_MM
+
+    sensor = _bare_area_sensor()
+    await sensor._on_positions(_at(5000, 5000))
+    await sensor._on_positions(_at(10000 + AREA_EDGE_MARGIN_MM - 50, 5000))
+    assert sensor._attr_native_value == "Area 1"
+    await sensor._on_positions(_at(10000 + AREA_EDGE_MARGIN_MM + 50, 5000))
+    assert sensor._attr_native_value == "transit"
+
+
+async def test_the_margin_does_not_pull_a_passing_mower_in() -> None:
+    """Entering takes being inside: close to an area is still transit."""
+    from custom_components.ecovacs_mower.sensor import AREA_EDGE_MARGIN_MM
+
+    sensor = _bare_area_sensor()
+    await sensor._on_positions(_at(15000, 5000))
+    assert sensor._attr_native_value == "transit"
+    await sensor._on_positions(_at(20000 - AREA_EDGE_MARGIN_MM + 50, 5000))
+    assert sensor._attr_native_value == "transit"
+    await sensor._on_positions(_at(20100, 5000))
+    assert sensor._attr_native_value == "Area 2"
+
+
+async def test_docked_wins_over_any_position() -> None:
+    from deebot_client.events import StateEvent
+    from deebot_client.models import State
+
+    sensor = _bare_area_sensor()
+    await sensor._on_state(StateEvent(State.DOCKED))
+    assert sensor._attr_native_value == "docked"
+    # getPos is answered on the charger too.
+    await sensor._on_positions(_at(5000, 5000))
+    assert sensor._attr_native_value == "docked"
+
+
+async def test_leaving_the_dock_is_placed_at_once() -> None:
+    """The dock is often outside the lawn — in a garage, behind a gate."""
+    from deebot_client.events import StateEvent
+    from deebot_client.models import State
+
+    sensor = _bare_area_sensor()
+    sensor._map.update_position(-3000, 5000, 0)
+    await sensor._on_state(StateEvent(State.DOCKED))
+    await sensor._on_state(StateEvent(State.CLEANING))
+    assert sensor._attr_native_value == "transit"
+    assert sensor._attr_extra_state_attributes == {"previous_area": None}
+
+
+async def test_an_unchanged_area_is_not_written_again() -> None:
+    """Positions arrive twice a second; the recorder wants a row per change."""
+    sensor = _bare_area_sensor()
+    for x in range(1000, 9000, 1000):
+        await sensor._on_positions(_at(x, 5000))
+    await sensor._on_positions(_at(15000, 5000))
+    await sensor._on_positions(_at(16000, 5000))
+    assert [value for value, _ in sensor.writes] == ["Area 1", "transit"]
+
+
+async def test_no_map_no_area() -> None:
+    """Before the first map message there is nothing to be in or between."""
+    sensor = _bare_area_sensor()
+    sensor._map.boundaries = []
+    await sensor._on_positions(_at(5000, 5000))
+    assert sensor._attr_native_value is None
+    assert sensor.writes == []
+
+
+async def test_a_charger_position_is_not_the_mower() -> None:
+    from deebot_client.events import Position, PositionsEvent
+    from deebot_client.rs.map import PositionType
+
+    sensor = _bare_area_sensor()
+    await sensor._on_positions(
+        PositionsEvent([Position(type=PositionType.CHARGER, x=5000, y=5000, a=0)])
+    )
+    assert sensor.writes == []
+
+
+def test_current_area_states_are_translated() -> None:
+    import json
+    from pathlib import Path
+
+    from custom_components.ecovacs_mower.sensor import (
+        CURRENT_AREA_DOCKED,
+        CURRENT_AREA_TRANSIT,
+    )
+
+    root = Path(__file__).parent.parent / "custom_components" / "ecovacs_mower"
+    strings = json.loads((root / "strings.json").read_text(encoding="utf-8"))
+    states = strings["entity"]["sensor"]["current_area"]["state"]
+    assert set(states) == {CURRENT_AREA_TRANSIT, CURRENT_AREA_DOCKED}

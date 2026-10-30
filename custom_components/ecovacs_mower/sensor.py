@@ -47,7 +47,9 @@ from deebot_client.events import (
     StatsEvent,
     TotalStatsEvent,
 )
+from deebot_client.events.map import PositionsEvent
 from deebot_client.models import State
+from deebot_client.rs.map import PositionType
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -82,6 +84,7 @@ from .entity import (
     EcovacsEntity,
 )
 from .errors import error_description
+from .map import MowerMap
 from .util import get_supported_entities
 
 _LOGGER = logging.getLogger(__name__)
@@ -349,6 +352,15 @@ async def async_setup_entry(
         # (deebot_patch/hardware.py); without this an unsupported mower class
         # gets an entity that can never have a value.
         and device.device_info["class"] in SUPPORTED_CLASSES
+    )
+
+    entities.extend(
+        EcovacsCurrentAreaSensor(device, controller.maps[device.device_info["did"]])
+        for device in controller.devices
+        if device.capabilities.device_type is DeviceType.MOWER
+        # The same gate as the map image: the area polygons and the position
+        # both come from the map the controller keeps per patched mower.
+        and device.device_info["did"] in controller.maps
     )
 
     for device in controller.devices:
@@ -931,3 +943,117 @@ class EcovacsMowingProgressSensor(
                 event.phase,
                 event.trigger,
             )
+
+
+# How far outside an area's outline the mower may stray and still count as
+# in that area. Edge cutting and boundary-hugging turns run along, and a
+# little over, the outline; without the allowance every one of them would
+# read as leaving the area.
+AREA_EDGE_MARGIN_MM = 500
+
+CURRENT_AREA_TRANSIT = "transit"
+CURRENT_AREA_DOCKED = "docked"
+ATTR_PREVIOUS_AREA = "previous_area"
+
+
+class EcovacsCurrentAreaSensor(
+    EcovacsEntity[CapabilityEvent[StateEvent]],
+    SensorEntity,
+):
+    """Which mowing area the mower is in, or that it is between areas.
+
+    The mower announces no "left the area" or "in transit" state: its clean
+    info only ever says working, pause or goCharging, and its job edges are
+    per job, not per area. What it does send is its position, at about 2 Hz,
+    and the map it is mowing; so the area is worked out here, from the two.
+
+    The state is the area's name (the mower's own label where it reports
+    one, otherwise "Area <n>"), ``transit`` while the mower is out but in no
+    area — on a passage between areas, or between the dock and the lawn —
+    and ``docked`` while it is on the charger. ``previous_area`` is the last
+    area it was in, so "left area X" is one state trigger to ``transit``
+    with a condition on that attribute.
+
+    Unlike the map image, which holds position updates to one every two
+    seconds for the frontend's sake, this reacts to every position: its
+    state only changes when the area does, so the full rate costs nothing,
+    and an automation timed on it wants the earliest sample there is.
+    """
+
+    entity_description = SensorEntityDescription(
+        key="current_area",
+        translation_key="current_area",
+    )
+
+    def __init__(self, device: Device, mower_map: MowerMap) -> None:
+        """Initialize entity."""
+        super().__init__(device, device.capabilities.state)
+        self._map = mower_map
+        self._state: State | None = None
+        self._area_index: int | None = None
+        self._previous_area: str | None = None
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Set up the event listeners now that hass is ready."""
+        await super().async_added_to_hass()
+
+        self._subscribe(self._capability.event, self._on_state)
+        self._subscribe(PositionsEvent, self._on_positions)
+
+    async def _on_state(self, event: StateEvent) -> None:
+        self._state = event.state
+        if event.state is State.DOCKED:
+            self._area_index = None
+            self._publish(CURRENT_AREA_DOCKED)
+        elif self._attr_native_value == CURRENT_AREA_DOCKED and (
+            self._map.position is not None
+        ):
+            # Leaving the dock: re-place the mower now rather than wait for
+            # its next position, which on some firmware lags the state.
+            self._place(self._map.position)
+
+    async def _on_positions(self, event: PositionsEvent) -> None:
+        # The position is read from the event rather than from the map: the
+        # controller moves the map from its own subscription to the same
+        # event, and the bus dispatches subscribers as separate tasks, so
+        # nothing promises the map has the new position yet.
+        for position in event.positions:
+            if position.type is PositionType.DEEBOT:
+                self._place((position.x, position.y))
+
+    def _place(self, point: tuple[int, int]) -> None:
+        if self._state is State.DOCKED:
+            # getPos is answered on the charger too; the dock wins.
+            return
+        if not self._map.areas:
+            # No map yet: nothing to be in or between.
+            return
+        index = self._map.area_at(point)
+        if index is None and self._area_index is not None:
+            # Hysteresis: a mower that was in an area stays in it until it is
+            # clearly outside, so a pass along the edge does not flicker
+            # through transit. Entering an area, by contrast, takes being in
+            # it, so the margin never pulls a passing mower in.
+            current = self._map.area_at(point, AREA_EDGE_MARGIN_MM)
+            if current == self._area_index:
+                index = current
+        if index is not None and index >= len(self._map.areas):
+            index = None
+        if index is None:
+            if self._area_index is not None:
+                self._previous_area = self._map.area_name(self._area_index)
+            self._area_index = None
+            self._publish(CURRENT_AREA_TRANSIT)
+        else:
+            self._area_index = index
+            self._publish(self._map.area_name(index))
+
+    def _publish(self, value: str) -> None:
+        # Only on a change: positions arrive twice a second, and a row per
+        # sample in the recorder would buy nothing.
+        if value == self._attr_native_value and self._attr_extra_state_attributes:
+            return
+        self._attr_native_value = value
+        self._attr_extra_state_attributes = {ATTR_PREVIOUS_AREA: self._previous_area}
+        self.async_write_ha_state()

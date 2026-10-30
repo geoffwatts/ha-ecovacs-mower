@@ -8,6 +8,7 @@ and the first onPos corrects it within seconds (KISS decision, 2026-08-10).
 
 from __future__ import annotations
 
+import math
 from typing import Any, Self
 
 from .deebot_patch.geometry import Point, Polygon, Segment
@@ -155,6 +156,50 @@ class MowerMap:
             dense = TRACK_MAX_POINTS // 2
             self.track = self.track[:-dense:2] + self.track[-dense:]
 
+    @property
+    def areas(self) -> list[Polygon]:
+        """The polygons that count as mowing areas for ``area_at``.
+
+        The two map dialects carve the lawn up differently: a multi-area
+        chain-dialect ``onArI`` reports one outline per area in
+        ``boundaries``, while the others report a single outline there and
+        the areas, if any, in ``zones``. Whichever of the two actually
+        divides the lawn is the one an "is it between areas" question has
+        to be asked against; a lone outline with no zones is one area.
+        """
+        if len(self.boundaries) > 1:
+            return self.boundaries
+        return self.zones or self.boundaries
+
+    def area_at(self, point: Point, margin: int = 0) -> int | None:
+        """The index into ``areas`` of the area at ``point``, or None.
+
+        ``margin`` (mm) also counts a point that close to an area's edge as
+        inside it — edge cutting and boundary-hugging turns run the mower
+        along, and slightly over, the outline it is mowing.
+        """
+        for index, polygon in enumerate(self.areas):
+            if len(polygon) < 3:
+                continue
+            if _inside(point, polygon) or (
+                margin and _distance_to_outline(point, polygon) <= margin
+            ):
+                return index
+        return None
+
+    def area_name(self, index: int) -> str:
+        """A name for ``areas[index]``: the mower's own label, if one is in it.
+
+        Labels come from ``getAreaSet`` on the classes that report area
+        names, each at a point inside its area; everywhere else, and for an
+        area no label falls in, the 1-based position stands in.
+        """
+        polygon = self.areas[index]
+        for point, name in self.labels:
+            if name and _inside(point, polygon):
+                return name
+        return f"Area {index + 1}"
+
     def sampled_track(self, limit: int) -> list[Point]:
         """The track thinned to roughly ``limit`` points, last point included.
 
@@ -275,3 +320,26 @@ class MowerMap:
         else:
             mower_map.lanes = rows
         return mower_map
+
+
+def _inside(point: Point, polygon: Polygon) -> bool:
+    """Even-odd ray cast; a point exactly on an edge may land either way."""
+    x, y = point
+    inside = False
+    for (x1, y1), (x2, y2) in zip(polygon, polygon[1:] + polygon[:1]):
+        if (y1 > y) != (y2 > y) and x < x1 + (y - y1) * (x2 - x1) / (y2 - y1):
+            inside = not inside
+    return inside
+
+
+def _distance_to_outline(point: Point, polygon: Polygon) -> float:
+    """Shortest distance from ``point`` to the polygon's closed outline."""
+    px, py = point
+    best = float("inf")
+    for (x1, y1), (x2, y2) in zip(polygon, polygon[1:] + polygon[:1]):
+        dx, dy = x2 - x1, y2 - y1
+        length_sq = dx * dx + dy * dy
+        t = 0.0 if not length_sq else ((px - x1) * dx + (py - y1) * dy) / length_sq
+        t = min(max(t, 0.0), 1.0)
+        best = min(best, math.hypot(px - (x1 + t * dx), py - (y1 + t * dy)))
+    return best

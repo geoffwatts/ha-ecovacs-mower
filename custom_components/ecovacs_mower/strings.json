@@ -104,6 +104,13 @@
       "rain_delay": { "name": "Rain delay duration" }
     },
     "sensor": {
+      "current_area": {
+        "name": "Current area",
+        "state": {
+          "transit": "Transit",
+          "docked": "Docked"
+        }
+      },
       "activity": {
         "name": "Activity",
         "state": {

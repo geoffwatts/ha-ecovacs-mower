@@ -258,3 +258,70 @@ def test_sampled_track_thins_evenly_and_keeps_the_ends() -> None:
     assert sampled[-1] == (999, 0)
     xs = [x for x, _ in sampled]
     assert xs == sorted(xs)
+
+
+# --- Areas ------------------------------------------------------------------
+
+_FRONT = [(0, 0), (10000, 0), (10000, 10000), (0, 10000)]
+_BACK = [(20000, 0), (30000, 0), (30000, 10000), (20000, 10000)]
+# An L-shape, so "inside" cannot be a bounding-box check.
+_L = [(0, 0), (10000, 0), (10000, 4000), (4000, 4000), (4000, 10000), (0, 10000)]
+
+
+def test_one_outline_per_area_is_what_divides_the_lawn() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([_FRONT, _BACK], [_L], None)
+    assert mower_map.areas == [_FRONT, _BACK]
+
+
+def test_a_single_outline_defers_to_its_zones() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([BOUNDARY], [_FRONT, _BACK], None)
+    assert mower_map.areas == [_FRONT, _BACK]
+
+
+def test_a_single_outline_with_no_zones_is_one_area() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([BOUNDARY], [], None)
+    assert mower_map.areas == [BOUNDARY]
+
+
+def test_area_at_finds_the_containing_area() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([_FRONT, _BACK], None, None)
+    assert mower_map.area_at((5000, 5000)) == 0
+    assert mower_map.area_at((25000, 5000)) == 1
+    assert mower_map.area_at((15000, 5000)) is None
+
+
+def test_area_at_follows_a_concave_outline() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([_L], None, None)
+    assert mower_map.area_at((2000, 8000)) == 0
+    # Inside the bounding box, outside the L.
+    assert mower_map.area_at((8000, 8000)) is None
+
+
+def test_the_margin_reaches_just_past_the_outline() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([_FRONT, _BACK], None, None)
+    assert mower_map.area_at((10400, 5000)) is None
+    assert mower_map.area_at((10400, 5000), margin=500) == 0
+    assert mower_map.area_at((10600, 5000), margin=500) is None
+    # Past a corner the distance is to the corner, not to either edge's line.
+    assert mower_map.area_at((10300, 10300), margin=500) == 0
+    assert mower_map.area_at((10400, 10400), margin=500) is None
+
+
+def test_a_degenerate_polygon_is_never_an_area_you_are_in() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([[(0, 0), (100, 100)], _BACK], None, None)
+    assert mower_map.area_at((50, 50), margin=1000) is None
+
+
+def test_an_area_is_named_by_the_label_inside_it() -> None:
+    mower_map = MowerMap()
+    mower_map.update_map_info([_FRONT, _BACK], None, None)
+    mower_map.update_labels([((25000, 5000), "Back"), ((15000, 5000), "Nowhere")])
+    assert mower_map.area_name(1) == "Back"
+    assert mower_map.area_name(0) == "Area 1"
